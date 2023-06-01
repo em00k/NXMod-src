@@ -1,0 +1,420 @@
+
+  --------------------------------------------------------------------------
+ 
+
+                        *   * *   * *   * ***** ****
+                        **  *  * *  ** ** *   * *   *
+                        * * *   *   * * * *   * *   *
+                        *  **  * *  *   * *   * *   *
+                        *   * *   * *   * ***** *****
+                        *
+                        *
+ 
+ 
+  --------------------------------------------------------------------------
+
+
+  25th September 2022                                                  v1.0a
+
+
+  Here's a quick guide to NXMOD (working title).
+
+  The source code contains many comments and hints/tips but doesn't explain
+  how to use the engine. This document provides additional information and
+  notes but is far from complete. A list of key API functions and variables
+  is provided to save hunting them down.
+
+  The project is spread across the following files;
+
+    INC/FINETUNE.INC
+    ASM/TEST.ASM
+    ASM/CTC.ASM
+    ASM/VOLUME.ASM
+    ASM/LOADER.ASM
+    ASM/PAULA.ASM
+    ASM/PLAYER.ASM
+    INC/PLAYER.INC
+    ASM/DAC.ASM
+
+
+  Text files with the Amiga vs. Next period frequences and semitones can be
+  found in the NTSC folder along with the period tables for each video mode.
+
+
+  --------------------------------------------------------------------------
+
+
+  INC/FINETUNE.INC
+
+  Tables for converting the Amiga period and sixteen fine tune levels. This
+  file can be placed at the beginning of any free bank8k. Note that the
+  symbols may not map to the correct location. The engine uses hard-coded
+  offsets to avoid this issue. The data is at location MM4 ($8000) when used
+  by the engine. The retrigger table is also in this file.
+
+
+  --------------------------------------------------------------------------
+
+
+  ASM/TEST.ASM
+
+  Test shell and example code to control the engine and get you started.
+
+
+  API functions:
+
+      load_test_mod
+      set_stereo_off
+      set_stereo_daad
+      set_stereo_bccb
+      period_to_string
+
+
+  --------------------------------------------------------------------------
+
+
+  ASM/CTC.ASM
+
+  This code and data can be discarded once called during startup. It sets up
+  the CTC timers for the video mode set during boot. The period translation
+  table loader is also only needed once and stored in this file - and can be
+  replaced.
+
+
+  API functions:
+
+      ctc_init
+      load_period_tab
+
+
+  --------------------------------------------------------------------------
+
+
+  ASM/VOLUME.ASM
+
+  The 16K volume table is generated from the code and data in this file. It
+  can be discarded after startup. The volume tables could be loaded from
+  SD card rendering this file obsolete.
+
+
+  API functions:
+
+      create_volume_tables
+
+
+  --------------------------------------------------------------------------
+
+
+  ASM/LOADER.ASM
+
+  The loader is required to read each MOD into SRAM. See BANK8K_PATTERNS and
+  BANK8K_SAMPLES for the location of the data. The samples in each MOD are
+  expanded to improve sample scaling performance. Detailed information can be
+  found within LOADER.ASM.
+
+  An error is returned if the file cannot be found or is invalid. Samples
+  larger than 64K are not currently supported and will return an error.
+
+  Each sample is loaded to a 256 byte aligned memory address. A future feature
+  is planned to set the white space to 128 (0db) between samples.
+
+  A full tracker application will require some of the logic from this file
+  when setting loop regions and importing samples.
+
+
+  Improvements can also be made to allow MODs to be played direct from SRAM.
+
+  There is no current check to detect if a MOD is too large for the Next's
+  internal memory.
+
+  The loader caches the MOD header and pattern data, leaving them intact. A
+  copy of the sample structure is created for the Next (see mod_instruments).
+
+  The Next instrument structure contains a silent short sample 0.
+  The instrument structure is ordered to map directly to the Paula registers.
+
+  The loader requires a small 256 byte aligned cache buffer (file_buf).
+
+
+  API functions:
+
+      mod_load
+
+
+  --------------------------------------------------------------------------
+
+
+  ASM/PAULA.ASM
+
+  This file contains the latest 16-bit accurate sample scaler. Paula is
+  emulated by scaling and buffering packets of 10 samples using CTC1, which
+  are sent to the DACs by CTC0 running at 10 times the rate of CTC1.
+
+  The two timers are kept in sync by reading the contents of the IY register.
+
+  AUDX registers control sample playback. DMACON controls channel enable.
+
+
+  The following variable is used to store the current Amiga period before it
+  was translated to 16-bit Next format. It is not read by Paula but should be
+  kept up-to-date;
+
+      AUD0PER   dw   0   ; Amiga period 0..4095 (12-bit)
+
+
+  The following variables are monitored real-time by CTC1;
+
+      AUD0RES   dw   0   ; Next period reset (16-bit)
+      AUD0CNT   dw   0   ; Next period count (16-bit)
+      AUD0LPL   dw   0   ; Loop location 21-bit (2MB)
+      AUD0LPH   db   0
+      AUD0LOP   dw   0   ; Loop length in samples 16-bit
+      AUD0LCL   dw   0   ; Location in SRAM 21-bit (2MB)
+      AUD0LCH   db   0
+      AUD0LEN   dw   0   ; Length in samples 16-bit
+      AUD0VOL   db   0   ; Volume 0..64
+
+      DMACON    db   0   ; Audio DMA enable (see AUD0EN)
+                db   0   ; Audio CTC enable (see DMAEN)
+
+  These registers are based on the 'official' Amiga hardware. There are four
+  sets in total - one of each channel; AUD0, AUD1, AUD2, AUD3
+
+
+  Interrupts should be disabled when accessing the 21-bit sample address
+  registers as they are not atomic being split across 3 bytes. WORD access
+  to the length registers is valid when interrupts are enabled.
+
+  The mod_instruments data structure maps directly to the AUDX registers
+  allowing sample playback to be done with a ten byte memcopy (see AUDX_lpl).
+  The volume is out of order on purpose.
+
+  The routine mod_trigger_period shows how to legally trigger a MOD sample.
+
+
+  A 16-bit counter (AUDxCNT) is used to scale the samples. It should be reset
+  to 0 when the period changes or when a new sample is triggered.
+
+  The counter counts 'up' as Z80 16-bit subtract-carry requires more Ts.
+
+  AUDxRES contains the scaling factor stored in the 8K period translation
+  table. AUDxRES (BC) is added to AUDxCNT (HL) each time a sample is written
+  to the DAC buffer. A new sample is fetched from SRAM when AUDxCNT causes
+  a carry;
+
+      ld   (paula_cache_a_0+1),a   ; Write current sample to DAC buffer
+      add  hl,bc                   ; Add AUDxRES to AUDxCNT
+      jr   nc,.no_0                ; Did it overflow 16-bits?
+      inc  de                      ; Advance sample pointer
+      ld   a,(de)                  ; Fetch new sample
+  .no_0:
+
+  The counter is not adjusted after an overflow for performance. Its behaviour
+  has been simulated on PC to generate the accurate 8K period table for each
+  Next video mode.
+
+  A VGA0 example for period 214 (C-3); NTSC Amiga hardware fetches 16726.84
+  samples per second. Next Paula translates period 214 to a 16-bit counter
+  value of 35077, fetching 16726.97 samples per second - A good match and far
+  better than the previous 8.8 fixed point maths;
+
+  Amiga            Next                   Method
+  ----------------------------------------------
+  214 - 16726.84 : 35077 - 16726.97Hz C-3 16-bit
+  214 - 16726.84 :   478 - 16736.40Hz C-3    8.8
+
+
+  65536 would represent 1.0 but that value cannot be stored in sixteen-bits.
+  65535 is the highest counter value, running close to the maximum output
+  rate, generating 30133.47Hz (HDMI 27Mhz) to 36829.79Hz (VGA6 33Mhz).
+
+  A counter set to 0 would play silence as the sample pointer will never
+  increase. A counter value of 1 would only pull around one sample byte every
+  two seconds!
+
+
+  The AUDxVOL registers should be set from 0 to 64. The Amiga hardware uses
+  7-bits for the volume, testing bit 6 (64 $40) to select maximum volume.
+  Next Paula emulates this method. The logic will use faster code when the
+  sample is played at -0db (64) as there is no need to volume scale it.
+
+
+  The Protracker 68000 replayer modifies DMACON directly as that is the 
+  default method to trigger a sample on the Amiga. The Z80N replayer uses a
+  dummy copy of DMACON (mod_dmacontemp), freeing DMACON for use by software
+  applications to toggle channels ON/OFF. CTC1 reads the bits in DMACON to
+  bypass channel output by writing 128 to the DAC buffers when a channel is
+  OFF (see AUD0EN). That also takes less CPU cycles as the scaler is removed
+  from the processing chain.
+
+  The second byte of DMACON contains the master CTC enable bit, set by the
+  function paula_enable to toggle the CTC interrupt vectors to point to either
+  dummy EI:RETI stubs or the engine routines. This method is the legal way to
+  completely disable the entire emulation engine. MOD playback can also be
+  stopped by writing 0 to mod_enable. Channels can be muted by setting their
+  volumes to 0 when MOD playback is disabled. Channels can also be muted by
+  triggering silent sample 0 (added by the loader) as long as MOD playback
+  was paused.
+
+
+  Paula requires CTC.ASM and DAC.ASM but does not require any of the MOD code.
+  The AUDX registers are also required.
+
+
+  API functions:
+
+      paula_vsync
+      paula_enable
+      paula_reset_dac
+      paula_flush_dacs
+
+
+  --------------------------------------------------------------------------
+
+
+  ASM/PLAYER.ASM
+
+  The Z80N player is a port of the Protracker 68000 replayer logic. The code
+  has been optimized for both space and performance, but there's always room
+  for improvement.
+
+  MOD playback is controlled by several variables;
+
+      mod_patterns         db   0   ; Pattern count (set by loader)
+      mod_bpm              dw   125 ; Default for 50Hz
+      mod_speed            db   6   ; Default for 50Hz
+      mod_counter          db   0   ; TICK/COUNT for SPEED and effects
+      mod_songpos          db   0   ; Song position in pattern table
+      mod_bank             db   BANK8K_PATTERNS
+      mod_ptr              dw   0
+      mod_position         db   0   ; PATTERN  (0..63) **ATOMIC** WORD
+                           db   0   ; DIVISION (0..63) **ATOMIC** WORD
+      mod_row              db   0   ; ROW/DIVISION (0..63)
+      mod_pbreakpos        db   0
+      mod_posjumpflag      db   0
+      mod_pbreakflag       db   0
+      mod_pattdelaytime    db   0   ; CMD $EE delay
+      mod_pattdelaytime2   db   0
+      mod_dmacontemp       db   0   ; Fake DMACON for MOD internal use
+      mod_volumeflags      db   0   ; **NEW**
+      mod_enable           db   0   ; MOD playback (0 = STOP)
+
+
+  Most of the variables are internal to the player. They update on interrupt
+  as the MOD pattern data is processed. A handful can be set by the host
+  application outside of the CTC2 interrupt - mod_enable is the most useful.
+ 
+  mod_position was added to give the host application a reliably way to read
+  the current pattern and row position as long as it is read as a WORD. A
+  shadow of mod_position should be made each main loop cycle, as that in
+  turn changes on interrupt when a MOD is playing. Reading a WORD keeps the
+  pattern and row byte variables in-sync with each other. Writing to this
+  variable has no effect. mod_position is a copy of mod_row and mod_songpos,
+  updated each time the MOD player reads a new row of data.
+
+  mod_speed, mod_bpm and mod_counter can be set outside of the interrupt.
+
+  mod_set_song_start, mod_set_song_row and mod_set_song_position are legal
+  ways to control the playback position as long as mod_enable is 0.
+
+  The routine mod_init is used to initialize the MOD player variables. It
+  also clears all of the Paula emulated registers.
+
+
+  The volume register output has been improved on the Next version to avoid
+  conflicts. The tremolo effect is called on TICK 0 to create a smoother
+  transition. This is different to the original 68000 replayer. All other
+  logic has been replicated as close as possible.
+
+
+  API functions:
+
+      mod_init
+      mod_set_song_start
+      mod_set_song_row
+      mod_set_song_position
+      mod_trigger_period
+      mod_trigger_sample
+      mod_pernop
+      mod_set_period_ix
+      mod_set_period_hl
+
+
+  --------------------------------------------------------------------------
+
+
+  INC/PLAYER.INC
+
+  The emulated Paula registers and structures for the four channels are in
+  this file. The main equates are also in here. The ORG location is set using
+  the following;
+
+     PAGE_PAULA equ   $F9    ; 63744
+     PAGE_DACA  equ   $FA    ; 64000
+     PAGE_DACB  equ   $FB    ; 64256
+
+  This data MUST be banked in when interrupts are enabled. It is also 256
+  byte aligned.
+
+  The Paula registers are interleaved with the MOD channel structures for
+  performance. The MOD structures are not used by Paula.
+
+
+  API functions:
+
+      N/A
+
+
+  --------------------------------------------------------------------------
+
+
+  ASM/DAC.ASM
+
+  The CTC0 DAC writing code can be found here. Its ORG is set by PAGE_DACA
+  and PAGE_DACB.
+
+  The CTC0 timer runs at a fast fixed rate for each video mode. IY and A'
+  Z80 registers have been exclusively assigned to this timer code to maximise
+  performance.
+
+  Fake WIP 'cheap' stereo panning is created by modifying the DAC modules to
+  toggle AD and BC DAC pairs from left to right at half the output rate,
+  around 16KHz.
+
+
+  API functions:
+
+      N/A
+
+
+  --------------------------------------------------------------------------
+
+
+  MMU
+
+  NXMOD modifies three MMU slots on interrupt;
+
+  CTC0 : --- --- --- --- --- --- --- --- DAC output
+  CTC1 : MM0 MM1 --- --- MM4 --- --- --- Sample scaler
+  CTC2 : --- --- --- --- MM4 --- --- --- MOD player
+
+  The core routines and variables are stored in MM7 which must be banked in
+  at all times when interrupts are enabled.
+
+  MM6 contains the loader because it uses MM2/MM3 for workspace. The loader
+  restores MM0/MM1 to 255 for file access as Paula changes MM0/MM1 when active.
+
+  MM6 also contains the startup routines. The loader and startup could be
+  moved to MM4 and/or MM5 if need be. There isn't much room left in MM7.
+
+  MM2/MM3/MM5/MM6 are not used by the CTC interrupts so can be banked out.
+
+  The engine sets MMUs when it requires data but never restores them.
+
+
+  9bitcolor
+
+
+  --------------------------------------------------------------------------
+
+

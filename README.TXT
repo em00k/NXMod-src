@@ -1,8 +1,3 @@
-# NXMod
-
- MOD player engine for the ZX Spectrum Next by 9bitcolor
-
-
 
  September 24th, 2022, NXMOD (working title) version v1.0a (beta)
 
